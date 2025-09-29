@@ -3,18 +3,25 @@
 import { api } from "../convex/_generated/api";
 import * as ConvexAtom from "@/app/convex-atom"
 import * as Result from "@effect-atom/atom/Result";
-import { useMutation } from "convex/react";
 import * as Option from "effect/Option"
+import * as Exit from "effect/Exit"
 import Link from "next/link";
+import { pretty } from "effect/Cause";
 
 export default function Home() {
   return (
     <>
       <header className="sticky top-0 z-10 bg-background p-4 border-b-2 border-slate-200 dark:border-slate-800 flex flex-row justify-between items-center">
-        Convex + Next.js
+        <span>Convex + Next.js (Atom Version)</span>
+        <Link
+          href="/regular"
+          className="bg-blue-500 text-white px-4 py-2 rounded hover:bg-blue-600 transition-colors"
+        >
+          Switch to Regular Version
+        </Link>
       </header>
       <main className="p-8 flex flex-col gap-16">
-        <h1 className="text-4xl font-bold text-center">Convex + Next.js</h1>
+        <h1 className="text-4xl font-bold text-center">Convex + Next.js (Atom Version)</h1>
         <Content />
       </main>
     </>
@@ -25,7 +32,7 @@ function Content() {
   const listNumberResult = ConvexAtom.useQuery(api.myFunctions.listNumbers, {
     count: 10,
   });
-  const addNumber = useMutation(api.myFunctions.addNumber)
+  const [, addNumber] = ConvexAtom.useMutation(api.myFunctions.addNumber)
 
   return Result.match(listNumberResult, {
     onInitial: () => (
@@ -35,21 +42,14 @@ function Content() {
     ),
     onFailure: (error) => (
       <div className="mx-auto">
-        <p className="text-red-600">Error loading numbers: {String(error)}</p>
+        <p className="text-red-600">Error loading numbers: {pretty(error.cause)}</p>
       </div>
     ),
     onSuccess: (success) => {
       // Handle Exit type from Convex function
       const exitValue = success.value;
-      if (!exitValue || typeof exitValue !== 'object' || !('_tag' in exitValue)) {
-        return <div>Invalid data structure</div>;
-      }
 
-      if (exitValue._tag !== 'Success') {
-        return <div>Query failed</div>;
-      }
-
-      const { viewer, numbers } = exitValue.value;
+      const { viewer, numbers } = exitValue;
       return (
         <div className="flex flex-col gap-8 max-w-lg mx-auto">
           <p>
@@ -66,9 +66,11 @@ function Content() {
           <p>
             <button
               className="bg-foreground text-background text-sm px-4 py-2 rounded-md"
-              onClick={() => {
-
-                void addNumber({ value: Math.floor(Math.random() * 100) });
+              onClick={async () => {
+                const exit = await addNumber({ value: Math.floor(Math.random() * 100) });
+                if (Exit.isFailure(exit)) {
+                  console.error('Failed to add number:', exit.cause);
+                }
               }}
             >
               Add a random number

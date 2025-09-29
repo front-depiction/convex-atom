@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@effect-atom/atom-react": "^0.1.17",
+    "@effect/platform-browser": "^0.71.0",
     "convex": "^1.27.0",
     "next": "15.2.3",
     "react": "^19.0.0",

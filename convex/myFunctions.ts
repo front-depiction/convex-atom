@@ -38,6 +38,8 @@ export const listNumbers = query({
       .order("desc")
       .take(args.count))
 
+    // throw "OOOOOPS"
+
     const userNameEffect = Effect.tryPromise(() => ctx.auth.getUserIdentity())
       .pipe(Effect.map(id => Option.fromNullable(id?.name)))
 
@@ -48,8 +50,8 @@ export const listNumbers = query({
       })),
     )
   }).pipe(
-    Effect.exit,
-    Effect.flatMap(exit => encodeTransparent(exit)),
+    //Effect.exit,
+    //Effect.flatMap(exit => encodeTransparent(exit)),
     Effect.runPromise,
   )
 });
