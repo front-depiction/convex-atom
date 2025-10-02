@@ -6,24 +6,19 @@ import * as Hash from "effect/Hash"
 import * as Equal from "effect/Equal"
 import * as Result from "@effect-atom/atom/Result";
 import * as Data from "effect/Data";
-import * as Context from "effect/Context";
 import { ConvexReactClient, useConvex } from "convex/react";
 import { type FunctionReference, type FunctionReturnType, type FunctionArgs, getFunctionName } from "convex/server";
 import { useAtom, useAtomValue } from "@effect-atom/atom-react";
 import { EmitOpsPush } from "effect/StreamEmit";
 import * as KeyValueStore from "@effect/platform/KeyValueStore"
 import * as Option from "effect/Option";
-import { BrowserKeyValueStore } from "@effect/platform-browser";
 import * as Layer from "effect/Layer"
 import React from "react";
-
-
-
-
+import * as SubscribeableStorage from "./subscribeable-storage";
 
 /**
  * Error type for Convex-related failures
- * @since 1.0.0
+ * @since 0.1.0
  * @category Errors
  */
 export class ConvexError extends Data.TaggedError("ConvexError")<{
@@ -37,75 +32,35 @@ export class ConvexError extends Data.TaggedError("ConvexError")<{
  */
 const isBrowser = () => typeof window !== "undefined" && typeof window.sessionStorage !== "undefined";
 
-
-class SubscribeableKeyValueStore extends Context.Tag("@convex-atom/SubscribeableKeyValueStore")<
-  SubscribeableKeyValueStore,
-  KeyValueStore.KeyValueStore & {
-    subscribe: (key: string, listener: (value: string) => void) => () => void
-  }
->() { }
-
-
-
-
-const BrowserSubscribeableLayerLocalStorage = Layer.map(BrowserKeyValueStore.layerLocalStorage, (ctx) => {
-  const kv = Context.get(ctx, KeyValueStore.KeyValueStore);
-  const channel = new BroadcastChannel("@convex-atom")
-  return Context.add(ctx, SubscribeableKeyValueStore, SubscribeableKeyValueStore.of({
-    ...kv,
-    set: (key, value) => kv.set(key, value).pipe(
-      Effect.tap(() => Effect.sync(() => channel.postMessage({ key, value })))
-    ),
-    subscribe: (key, listener) => {
-
-      const onStorage = (event: StorageEvent) => {
-        if (event.key === key && event.newValue && event.newValue !== event.oldValue) {
-          listener(event.newValue!);
-        }
-      }
-
-      const onBroadcast = (event: MessageEvent) => {
-        if (event.data && event.data.key === key && typeof event.data.value === "string") {
-          listener(event.data.value)
-        }
-      }
-
-      addEventListener("storage", onStorage);
-      channel.addEventListener("message", onBroadcast)
-      // Return unsubscribe function
-      return () => {
-        removeEventListener("storage", onStorage)
-        channel.removeEventListener("message", onBroadcast)
-      }
-
-    }
-  }))
-})
-
 /**
- * @since 1.0.0
+ * @since 0.1.0
  * @category Symbols
  */
 export const QueryParamsTypeId: unique symbol = Symbol.for("@convex-atom/QueryParams");
+export type QueryParamsTypeId = typeof QueryParamsTypeId;
+
 
 /**
- * @since 1.0.0
- * @category Symbols
+ * Type guard to check if a value is QueryParams
+ * @since 0.1.0
+ * @category Predicates
  */
-export type QueryParamsTypeId = typeof QueryParamsTypeId;
+export const isQueryParams = <Query extends FunctionReference<"query">>(u: unknown): u is QueryParams<Query> =>
+  u !== null &&
+  typeof u === "object" &&
+  QueryParamsTypeId in u;
+
 
 /**
  * Query parameters for Convex query atoms
- * @since 1.0.0
+ * @since 0.1.0
  * @category Models
  */
-interface QueryParams<Query extends FunctionReference<"query">> {
+interface QueryParams<Query extends FunctionReference<"query">> extends Hash.Hash, Equal.Equal {
   readonly [QueryParamsTypeId]: QueryParamsTypeId;
   readonly client: ConvexReactClient;
   readonly query: Query;
   readonly args: FunctionArgs<Query>;
-  readonly [Hash.symbol]: () => number;
-  readonly [Equal.symbol]: (that: unknown) => boolean;
 }
 
 const QueryParamsProto = {
@@ -147,14 +102,8 @@ const makeQueryParams = <Query extends FunctionReference<"query">>({
  * Atom family for Convex queries.
  * Creates reactive atoms that automatically update when Convex data changes.
  *
- * @since 1.0.0
+ * @since 0.1.0
  * @category Atoms
- *
- * @example
- * ```ts
- * const params = makeQueryParams({ client, query: api.users.list, args: {} });
- * const atom = convexQueryFamily(params);
- * ```
  */
 export const convexQueryFamily = Atom.family(
   <Query extends FunctionReference<"query">>(
@@ -165,26 +114,32 @@ export const convexQueryFamily = Atom.family(
         (emit: EmitOpsPush<ConvexError, FunctionReturnType<Query>>) =>
           Effect.acquireRelease(
             Effect.gen(function* () {
-              const kv = yield* Effect.serviceOption(SubscribeableKeyValueStore);
+              const kv = yield* Effect.serviceOption(KeyValueStore.KeyValueStore);
+              const broadcast = yield* Effect.serviceOption(SubscribeableStorage.StorageBroadcast);
+              const subscription = yield* Effect.serviceOption(SubscribeableStorage.StorageSubscription);
+
               const kvKey = getFunctionName(params.query) + JSON.stringify(params.args);
               const watch = params.client.watchQuery(params.query, params.args);
 
-              let unsubscribeKv = () => { };
+              let unsubscribeStorage = () => { };
+              let unsubscribeBroadcast = () => { };
 
+              const listener = (value: string) => Effect.try(() => emit.single(JSON.parse(value)))
+                .pipe(
+                  Effect.tapError((err) => Effect.sync(() => emit.fail(new ConvexError({
+                    message: `Failed to parse stored value for key ${kvKey}`,
+                    cause: err
+                  })))),
+                  Effect.orElse(() => Effect.void)
+                )
 
-              // Set up KV subscription first (if available)
-              if (Option.isSome(kv)) {
+              // Set up subscriptions (if available)
+              if (Option.isSome(subscription)) {
+                unsubscribeStorage = yield* subscription.value.subscribe(kvKey, listener);
+              }
 
-                unsubscribeKv = kv.value.subscribe(kvKey, (value: string) => {
-                  try {
-                    emit.single(JSON.parse(value));
-                  } catch (err) {
-                    emit.fail(new ConvexError({
-                      message: `Failed to parse stored value for key ${kvKey}`,
-                      cause: err
-                    }));
-                  }
-                });
+              if (Option.isSome(broadcast)) {
+                unsubscribeBroadcast = yield* broadcast.value.subscribe(kvKey, listener);
               }
 
               // Initial load: try localQueryResult first, then cached value
@@ -192,9 +147,12 @@ export const convexQueryFamily = Atom.family(
                 const initial = watch.localQueryResult();
                 if (initial !== undefined) {
                   emit.single(initial);
-                  // Store in KV to trigger subscriptions in other tabs
+                  // Store in KV and broadcast to other tabs
                   if (Option.isSome(kv)) {
                     yield* kv.value.set(kvKey, JSON.stringify(initial));
+                  }
+                  if (Option.isSome(broadcast)) {
+                    yield* broadcast.value.post(kvKey, JSON.stringify(initial));
                   }
                 } else {
                   // No initial result from watch, check cached value
@@ -214,14 +172,21 @@ export const convexQueryFamily = Atom.family(
                 }));
               }
 
-              // Set up Convex subscription - only updates KV, no direct emission
+              // Set up Convex subscription - updates KV and broadcasts
               const unsubscribe = watch.onUpdate(
                 () => {
                   try {
                     const result = watch.localQueryResult();
-                    if (result !== undefined && Option.isSome(kv)) {
-                      // Just update KV - subscription will handle emission
-                      kv.value.set(kvKey, JSON.stringify(result)).pipe(Effect.runSync);
+                    if (result !== undefined) {
+                      const value = JSON.stringify(result);
+
+                      if (Option.isSome(kv)) {
+                        kv.value.set(kvKey, value).pipe(Effect.runSync);
+                      }
+
+                      if (Option.isSome(broadcast)) {
+                        broadcast.value.post(kvKey, value).pipe(Effect.runSync);
+                      }
                     }
                   } catch (error) {
                     emit.fail(new ConvexError({
@@ -234,10 +199,11 @@ export const convexQueryFamily = Atom.family(
               // Return cleanup function
               return () => {
                 unsubscribe();
-                unsubscribeKv();
+                unsubscribeStorage();
+                unsubscribeBroadcast();
               };
             }).pipe(
-              Effect.provide(isBrowser() ? BrowserSubscribeableLayerLocalStorage : Layer.empty),
+              Effect.provide(isBrowser() ? SubscribeableStorage.layerLocalStorage : Layer.empty),
               Effect.mapError(error => new ConvexError({
                 message: `Stream failed`,
                 cause: error
@@ -262,20 +228,25 @@ export const convexQueryFamily = Atom.family(
 
 
 /**
- * @since 1.0.0
+ * @since 0.1.0
  * @category Symbols
  */
 export const MutationParamsTypeId: unique symbol = Symbol.for("@convex-atom/MutationParams");
-
-/**
- * @since 1.0.0
- * @category Symbols
- */
 export type MutationParamsTypeId = typeof MutationParamsTypeId;
 
 /**
+ * Type guard to check if a value is MutationParams
+ * @since 0.1.0
+ * @category Predicates
+ */
+export const isMutationParams = <Mutation extends FunctionReference<"mutation">>(u: unknown): u is MutationParams<Mutation> =>
+  u !== null &&
+  typeof u === "object" &&
+  MutationParamsTypeId in u;
+
+/**
  * Mutation parameters for Convex mutation atoms
- * @since 1.0.0
+ * @since 0.1.0
  * @category Models
  */
 interface MutationParams<Mutation extends FunctionReference<"mutation">> {
@@ -321,7 +292,7 @@ const makeMutationParams = <Mutation extends FunctionReference<"mutation">>({
  * Atom family for Convex mutations.
  * Creates effectful function atoms that execute mutations.
  *
- * @since 1.0.0
+ * @since 0.1.0
  * @category Atoms
  */
 export const convexMutationFamily = Atom.family(
@@ -344,21 +315,11 @@ export const convexMutationFamily = Atom.family(
  * React hook for Convex queries with automatic reactivity.
  * Returns a Result type that handles loading, success, and error states.
  *
- * @since 1.0.0
+ * @since 0.1.0
  * @category Hooks
  *
  * @param query - The Convex query function reference
  * @param args - Optional arguments for the query
- * @returns Result containing the query data or error
- *
- * @example
- * ```tsx
- * const users = useQuery(api.users.list);
- *
- * if (Result.isInitial(users)) return <div>Loading...</div>;
- * if (Result.isFailure(users)) return <div>Error: {users.error.message}</div>;
- * return <div>{users.value.map(...)}</div>;
- * ```
  */
 export const useQuery = <Query extends FunctionReference<"query">>(
   query: Query,
@@ -378,23 +339,10 @@ export const useQuery = <Query extends FunctionReference<"query">>(
  * React hook for Convex mutations.
  * Returns an effectful function that executes the mutation.
  *
- * @since 1.0.0
+ * @since 0.1.0
  * @category Hooks
  *
  * @param mutation - The Convex mutation function reference
- * @returns Function that executes the mutation and returns a promise
- *
- * @example
- * ```tsx
- * const createUser = useMutation(api.users.create);
- *
- * const handleSubmit = async (data) => {
- *   const exit = await createUser({ name: data.name });
- *   if (Exit.isSuccess(exit)) {
- *     console.log('User created:', exit.value);
- *   }
- * };
- * ```
  */
 export const useMutation = <Mutation extends FunctionReference<"mutation">>(
   mutation: Mutation
@@ -408,21 +356,3 @@ export const useMutation = <Mutation extends FunctionReference<"mutation">>(
   return useAtom(mutationAtom, { mode: "promiseExit" });
 };
 
-
-/**
- * Type guard to check if a value is QueryParams
- * @since 1.0.0
- */
-export const isQueryParams = <Query extends FunctionReference<"query">>(u: unknown): u is QueryParams<Query> =>
-  u !== null &&
-  typeof u === "object" &&
-  QueryParamsTypeId in u;
-
-/**
- * Type guard to check if a value is MutationParams
- * @since 1.0.0
- */
-export const isMutationParams = <Mutation extends FunctionReference<"mutation">>(u: unknown): u is MutationParams<Mutation> =>
-  u !== null &&
-  typeof u === "object" &&
-  MutationParamsTypeId in u;
