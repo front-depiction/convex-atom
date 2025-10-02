@@ -3,7 +3,6 @@
 import { api } from "../../convex/_generated/api";
 import { useQuery, useMutation } from "convex/react";
 import * as Option from "effect/Option"
-import * as Exit from "effect/Exit"
 import Link from "next/link";
 
 export default function RegularPage() {

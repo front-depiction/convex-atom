@@ -7,6 +7,7 @@ import * as Option from "effect/Option"
 import * as Exit from "effect/Exit"
 import Link from "next/link";
 import { pretty } from "effect/Cause";
+import { useAtom } from "@effect-atom/atom-react";
 
 export default function Home() {
   return (
@@ -59,6 +60,7 @@ function Content() {
             })}
             !
           </p>
+
           <p>
             Click the button below and open this page in another window - this data
             is persisted in the Convex cloud database!
