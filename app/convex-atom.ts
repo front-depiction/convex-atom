@@ -126,11 +126,12 @@ export const convexQueryFamily = Atom.family(
 
               const listener = (value: string) => Effect.try(() => emit.single(JSON.parse(value)))
                 .pipe(
-                  Effect.tapError((err) => Effect.sync(() => emit.fail(new ConvexError({
-                    message: `Failed to parse stored value for key ${kvKey}`,
-                    cause: err
-                  })))),
-                  Effect.orElse(() => Effect.void)
+                  Effect.catchAll((err) => Effect.sync(() =>
+                    emit.fail(new ConvexError({
+                      message: `Failed to parse stored value for key ${kvKey}`,
+                      cause: err
+                    }))
+                  ))
                 )
 
               // Set up subscriptions (if available)
